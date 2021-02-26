@@ -187,7 +187,7 @@ Example :
 (defn
   ^{:arglists '([flow])
     :doc "
-In an ambiguous process block, runs given `flow` preemptively (aka switch), forking process for each emitted value. Forked process is cancelled if `flow` emits another value before it terminates.
+In an ambiguous or continuous process block, runs given `flow` preemptively (aka switch), forking process for each emitted value. Forked process is cancelled if `flow` emits another value before it terminates.
 
 Example :
 ```clojure
@@ -245,6 +245,12 @@ Cancelling an `ap` flow triggers cancellation of the task/flow it's currently ru
                  ?= i/fiber-unpark}
               ~@body) i/ap))
 
+(defmacro
+  ^{:arglists '([& body])
+    :doc "
+Returns a flow evaluating `body` (in an implicit `do`) and producing values of each subsequent fork. Body evaluation can be forked with `?!`, each flow will be lazily sampled.
+"} cp [& body]
+  `(partial (cr {?! i/fiber-unpark} ~@body) i/cp))
 
 (defn
   ^{:static true

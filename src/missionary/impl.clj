@@ -4,7 +4,7 @@
            (missionary.impl
              Enumerate Aggregate RaceJoin Sleep Never Ambiguous Fiber Thunk Dataflow Mailbox Rendezvous Semaphore
              Watch Observe Transform Integrate Pub Sub Relieve Buffer Latest Sample Zip Sequential Ambiguous$Process
-             Reactor Reactor$Context Reactor$Publisher)))
+             Reactor Reactor$Context Reactor$Publisher Continuous Continuous$Process)))
 
 (defn nop [])
 
@@ -32,6 +32,9 @@
 
 (defmethod print-method Ambiguous$Process [o w] (print-object o w))
 (defn ap [c n t] (Ambiguous/process c n t))
+
+(defmethod print-method Continuous$Process [o w] (print-object o w))
+(defn cp [c n t] (Continuous/process c n t))
 
 (defn fiber-unpark      []  (.unpark     ^Fiber (.get Fiber/CURRENT)))
 (defn fiber-poll        []  (.poll       ^Fiber (.get Fiber/CURRENT)))
