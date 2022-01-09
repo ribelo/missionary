@@ -1,72 +1,73 @@
 package missionary.impl;
 
-import clojure.lang.AFn;
-import clojure.lang.IDeref;
-import clojure.lang.IFn;
-import clojure.lang.IRef;
+import clojure.lang.*;
+import missionary.Cancelled;
 
-import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+public interface Watch {
 
-public final class Watch extends AFn implements IDeref {
+    final class Process extends AFn implements IDeref {
+        IFn notifier;
+        IFn terminator;
+        IRef reference;
+        Object value;
 
-    static final AtomicReferenceFieldUpdater<Watch, Object> STATE =
-            AtomicReferenceFieldUpdater.newUpdater(Watch.class, Object.class, "state");
+        @Override
+        public synchronized Object invoke() {
+            kill(this);
+            return null;
+        }
 
-    static final IFn WATCH = new AFn() {
+        @Override
+        public synchronized Object deref() {
+            return transfer(this);
+        }
+    }
+
+    IFn watch = new AFn() {
         @Override
         public Object invoke(Object key, Object ref, Object prev, Object curr) {
-            Watch that = (Watch) key;
-            for(;;) {
-                Object s = that.state;
-                if (s == WATCH) break;
-                if (STATE.compareAndSet(that, s, curr)) {
-                    if (s == STATE) that.notifier.invoke();
-                    break;
-                }
+            Process ps = (Process) key;
+            synchronized (ps) {
+                Object x = ps.value;
+                ps.value = curr;
+                return x == ps ? ps.notifier.invoke() : null;
             }
-            return null;
         }
     };
 
-    IFn notifier;
-    IFn terminator;
-    IRef reference;
-    Object last;
+    static void kill(Process ps) {
+        IFn n = ps.notifier;
+        if (n != null) {
+            ps.notifier = null;
+            ps.reference.removeWatch(ps);
+            Object x = ps.value;
+            if (x == ps) {
+                ps.value = null;
+                n.invoke();
+            }
+        }
+    }
 
-    volatile Object state;
+    static Object transfer(Process ps) {
+        if (ps.notifier == null) {
+            ps.terminator.invoke();
+            return clojure.lang.Util.sneakyThrow(new Cancelled("Watch cancelled."));
+        } else {
+            Object x = ps.value;
+            ps.value = ps;
+            return x;
+        }
+    }
 
-    public Watch (IRef r, IFn n, IFn t) {
-        notifier = n;
-        terminator = t;
-        reference = r;
-        state = r.deref();
+    static Object run(IRef r, IFn n, IFn t) {
+        Process ps = new Process();
+        ps.notifier = n;
+        ps.terminator = t;
+        ps.reference = r;
+        ps.value = r.deref();
+        r.addWatch(ps, watch);
         n.invoke();
-        r.addWatch(this, WATCH);
+        return ps;
     }
 
-    @Override
-    public Object invoke() {
-        for(;;) {
-            Object x = state;
-            if (x == WATCH) return null;
-            last = x;
-            if (STATE.compareAndSet(this, x, WATCH)) {
-                if (x == STATE) terminator.invoke();
-                reference.removeWatch(this);
-                return null;
-            }
-        }
-    }
-
-    @Override
-    public Object deref() {
-        for(;;) {
-            Object x = state;
-            if (x == WATCH) {
-                terminator.invoke();
-                return last;
-            }
-            if (STATE.compareAndSet(this, x, STATE)) return x;
-        }
-    }
 }

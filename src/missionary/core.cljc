@@ -2,7 +2,7 @@
   (:refer-clojure :exclude [reduce reductions eduction group-by])
   (:require [missionary.impl :as i]
             [cloroutine.core :refer [cr] :include-macros true])
-  (:import (missionary.impl Reduce Reductions GroupBy Relieve Latest Sample Reactor Fiber Sequential Ambiguous Continuous))
+  (:import (missionary.impl Reduce Reductions GroupBy Relieve Latest Sample Reactor Fiber Sequential Ambiguous Continuous Watch Observe))
   #?(:cljs (:require-macros [missionary.core :refer [sp ap cp amb amb> amb= ! ? ?> ?< ?? ?! ?= holding reactor]])))
 
 
@@ -535,18 +535,24 @@ Example :
   ^{:static true
     :arglists '([reference])
     :doc "
-Returns a continuous flow producing successive values of given `reference` until cancelled. Given reference must support `add-watch`, `remove-watch` and `deref`. Oldest values are discarded on overflow.
-"} watch [r] (fn [n t] (i/watch r n t)))
+Returns a continuous flow reflecting the current state of a reference type. `reference` must support `add-watch`,
+`remove-watch` and `deref`. On initialization, the process is ready to transfer. On transfer, the current state is
+returned. Whenever the state of the reference changes and a transfer is not pending, the process becomes ready to
+transfer again. Cancelling the process makes it fail immediately with an instance of `missionary.Cancelled` and
+terminates the process.
+"} watch [r] (fn [n t] (Watch/run r n t)))
 
 
 (defn
   ^{:static true
     :arglists '([subject])
     :doc "
-Returns a discrete flow observing values produced by a non-backpressured subject until cancelled. `subject` must be a function taking a 1-arity `event` function and returning a 0-arity `cleanup` function.
-
-`subject` function is called on initialization. `cleanup` function is called on cancellation. `event` function may be called at any time, it throws an exception on overflow and becomes a no-op after cancellation.
-"} observe [s] (fn [n t] (i/observe s n t)))
+Returns a discrete flow observing values produced by a non-backpressured subject. `subject` must be a function taking a
+callback and returning a cleanup thunk. On initialization, the process calls the subject with a fresh callback. Passing
+a value to the callback makes the process ready to transfer this value. Cancelling the process makes it fail immediately
+with an instance of `missionary.Cancelled` and terminates the process. The cleanup thunk is called on termination. The
+callback throws an `Error` if the process is cancelled or terminated, or if a transfer is pending.
+"} observe [s] (fn [n t] (Observe/run s n t)))
 
 
 (def
@@ -768,33 +774,28 @@ Example :
 ```
 "} group-by [kf f] (fn [n t] (GroupBy/run kf f n t)))
 
-(defn
+(def
   ^{:static true
     :arglists '([boot])
     :doc "
-TODO
-reactor terminates when all nodes are terminated. Success if all nodes successfully terminated, first error otherwise.
-first node failure : the reactor is cancelled, will fail with this error when terminated
-cancelling the reactor : every active node is cancelled along with subsequent ones.
-cancelling a publisher : cancel underlying flow. If continuous, becomes eager.
-cancelling a subscription : the subscription fails with Cancelled.
-publisher failed : every subscription is cancelled along with subsequent ones.
-publisher completed : every subscription terminates, subsequent ones terminate immediately (after first transfer for signals)
-
-
-
-
 Returns a task spawning a reactor context with given boot function, called without argument. A reactor context manages
-the lifecycle of running flows and serializes their emissions in propagation turns. Flows running in a reactor context
-are called publishers, they can be spawned in the boot function or in reaction to any subsequent emission with `stream!`
-or `signal!`, respectively for discrete and continuous flows. Publishers of a given reactor context are totally ordered
-by the union of two partial orders :
-* if a publisher was created by another one, the parent is inferior to the child.
-* if two publishers are siblings, the older is inferior to the younger.
+the execution of concurrent flows and serializes events in a succession of transactions (aka propagation turns).
 
-A publisher can subscribe to the feed of an inferior publisher from the same reactor context. Using a publisher as a
-flow spawns a subscription to this publisher. Publisher emissions are grouped in propagation turns, where successive
-publishers of a given turn are strictly increasing. When a publisher becomes able to emit, it is compared to the
+A publisher is an identity representing a flow running in a reactor context. A publisher can be spawned in the boot
+function or in reaction to any subsequent emission with `stream!` or `signal!`, respectively discrete and continuous.
+
+A publisher can share the values produced by its underlying process to other publishers via subscriptions. Using a
+publisher as a flow spawns a new subscription, this operation is allowed only if the publisher's reactor context is
+currently executing another publisher, and the former comes before the latter in the post-order publisher tree.
+
+During a transaction, each publisher is allowed to notify its subscriptions, at most once. A publisher is active in a
+transaction if it becomes ready to transfer synchronously on a notification of a subscription in the same transaction
+
+<TODO>
+Publisher emissions are grouped in propagation turns, where successive
+publishers of a given turn are strictly increasing.
+
+ When a publisher becomes able to emit, it is compared to the
 publisher currently emitting to figure out whether the emission must happen on the current turn or on the next one.
 Cyclic reactions are possible and no attempt is made to prevent them, so care must be taken to ensure the propagation
 eventually stops. The dispatching mechanism depends on the nature of the publisher, discrete or continuous.
@@ -806,16 +807,24 @@ will be immediately notified.
 flow is ready to transfer. On emission, its current value is marked as stale and its subscriptions are notified if not
 already. From this point, a sampling request from any of its subscriptions will trigger the transfer from the flow to
 refresh the current value. Subsequent sampling requests will reuse this memoized value until next emission.
+</TODO>
 
-A subscription terminates when it's cancelled or when the underlying publisher terminates. A publisher can be cancelled,
-as long as its flow is not terminated, by calling it as a zero-argument function. A cancelled publisher cancels its
-flow, transfers and discards all of its remaining values without backpressure, and all of its current and future
-subscriptions fail immediately. Cancelling a reactor cancels all of its publishers, and any subsequent publisher
-spawning will fail. If any publisher flow fails, or if the boot function throws an exception, the reactor is cancelled.
-A reactor terminates at the end of the first turn where every publisher flow is terminated, meaning no emission can
-ever happen anymore. It succeeds with the result of the boot function if no publisher failed, otherwise it fails with
-the first error encountered.
-"} reactor-call [i] (fn [s f] (Reactor/run i s f)))
+
+When a stream completes, ...
+When a signal completes, its latest value is treated as the final state. Active subscriptions terminate after having
+transferred this value, subsequent subscriptions transfer only this value and complete afterwards.
+
+Calling a publisher as a zero-argument function cancels the underlying process. When cancelled, signals transfer eagerly.
+Cancelling a subscription before termination makes it fail immediately with `Cancelled`.
+
+When a reactor is cancelled, all of its active publishers are cancelled along with any one subsequently spawned.
+When a publisher crashes, all of its active subscriptions are cancelled along with any one subsequently spawned.
+If the boot function throws an exception, or any publisher crashes, the reactor is cancelled.
+
+A reactor terminates at the end of the first turn where every publisher flow is terminated, meaning no transfer can
+ever happen anymore. The task succeeds with the result of the boot function if no error happened, otherwise it fails
+with the first error.
+"} reactor-call (fn [i] (fn [s f] (Reactor/run i s f))))
 
 
 (defmacro
@@ -825,17 +834,17 @@ Calls `reactor-call` with a function evaluating given `body` in an implicit `do`
 "} reactor [& body] `(reactor-call (fn [] ~@body)))
 
 
-(defn
+(def
   ^{:static true
     :arglists '([flow])
     :doc "
 Spawns a discrete publisher from given flow, see `reactor-call`.
-"} stream! [f] (Reactor/publish f true))
+"} stream! (fn [f] (Reactor/publish f false)))
 
 
-(defn
+(def
   ^{:static true
     :arglists '([flow])
     :doc "
 Spawns a continuous publisher from given flow, see `reactor-call`.
-"} signal! [f] (Reactor/publish f false))
+"} signal! (fn [f] (Reactor/publish f true)))

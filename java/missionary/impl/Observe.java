@@ -1,97 +1,78 @@
 package missionary.impl;
 
 import clojure.lang.*;
+import missionary.Cancelled;
 
-import java.util.concurrent.atomic.AtomicReferenceFieldUpdater;
+public interface Observe {
 
-import static missionary.impl.Util.NOP;
+    final class Process extends AFn implements IDeref {
 
-public final class Observe extends AFn implements IDeref {
+        IFn notifier;
+        IFn terminator;
+        Object unsub;
+        Object value;
 
-    static final AtomicReferenceFieldUpdater<Observe, Object> STATE =
-            AtomicReferenceFieldUpdater.newUpdater(Observe.class, Object.class, "state");
+        @Override
+        public synchronized Object invoke() {
+            kill(this);
+            return null;
+        }
 
-    static final ExceptionInfo OVERFLOW =
-            new ExceptionInfo("Unable to process event : consumer is not ready.",
-                    PersistentHashMap.EMPTY);
-
-    IFn notifier;
-    IFn terminator;
-    Object unsubscribe;
-    boolean failed;
-    Object last = STATE;
-
-    volatile Object state = STATE;
-
-    void unsub() {
-        try {
-            ((IFn) unsubscribe).invoke();
-            terminator.invoke();
-        } catch (Throwable e) {
-            failed = true;
-            last = e;
-            notifier.invoke();
+        @Override
+        public synchronized Object deref() {
+            return transfer(this);
         }
     }
 
-    public Observe(IFn sub, IFn n, IFn t) {
-        notifier = n;
-        terminator = t;
-        try {
-            unsubscribe = sub.invoke(new AFn() {
-                @Override
-                public Object invoke(Object x) {
-                    for(;;) {
-                        Object s = state;
-                        if (s == NOP) break;
-                        if (s != STATE) throw OVERFLOW;
-                        if (STATE.compareAndSet(Observe.this, s, x)) {
-                            notifier.invoke();
-                            break;
+    static void kill(Process ps) {
+        IFn n = ps.notifier;
+        if (n != null) {
+            ps.notifier = null;
+            Object x = ps.value;
+            ps.value = null;
+            if (x == ps) n.invoke();
+        }
+    }
+
+    static Object transfer(Process ps) {
+        if (ps.notifier == null) {
+            ps.terminator.invoke();
+            ((IFn) ps.unsub).invoke();
+            return clojure.lang.Util.sneakyThrow(new Cancelled("Observe cancelled."));
+        } else {
+            Object x = ps.value;
+            ps.value = ps;
+            return x;
+        }
+    }
+
+    static Object run(IFn sub, IFn n, IFn t) {
+        Process ps = new Process();
+        synchronized (ps) {
+            try {
+                ps.notifier = n;
+                ps.terminator = t;
+                ps.value = ps;
+                ps.unsub = sub.invoke(new AFn() {
+                    @Override
+                    public Object invoke(Object x) {
+                        synchronized (ps) {
+                            if (ps.value != ps) throw new Error("Can't process event - consumer is not ready.");
+                            ps.value = x;
+                            return ps.notifier.invoke();
                         }
                     }
-                    return null;
-                }
-            });
-        } catch (Throwable e) {
-            failed = true;
-            last = e;
-            Object s;
-            while (!STATE.compareAndSet(this, s = state, NOP));
-            if (s == STATE) notifier.invoke();
-        }
-    }
-
-    @Override
-    public Object invoke() {
-        for(;;) {
-            Object s = state;
-            if (s == NOP) break;
-            last = s;
-            if (STATE.compareAndSet(this, s, NOP)) {
-                if (s == STATE) unsub();
-                break;
+                });
+            } catch (Throwable e) {
+                ps.unsub = new AFn() {
+                    @Override
+                    public Object invoke() {
+                        return clojure.lang.Util.sneakyThrow(e);
+                    }
+                };
+                kill(ps);
             }
-        }
-        return null;
-    }
-
-    @Override
-    public Object deref() {
-        for(;;) {
-            Object s = state;
-            if (s == NOP) {
-                if (failed) {
-                    terminator.invoke();
-                    return clojure.lang.Util.sneakyThrow((Throwable) last);
-                } else {
-                    Object x = last;
-                    unsub();
-                    return x;
-                }
-            } else if (STATE.compareAndSet(this, s, STATE)) {
-                return s;
-            }
+            return ps;
         }
     }
 }
